@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Secrets: keep .env.example, never real env files
+.env
+.env.*
+!.env.example
+
+# Local databases and uploaded files
+data/
+storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
