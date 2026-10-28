@@ -43,7 +43,28 @@ This starts `pgvector/pgvector:pg16` (the `vector` extension is enabled at init)
 port 8000. The API container runs `alembic upgrade head` before it starts.
 (The compose setup has not been run yet; Postgres was verified on a local Homebrew install, see below.)
 
-### Postgres without Docker
+### Local dev on Homebrew Postgres + pgvector (recommended on macOS)
+
+```bash
+brew install postgresql@18 pgvector ffmpeg
+brew services start postgresql@18
+createdb upscaler_dev
+psql -d upscaler_dev -c "CREATE EXTENSION IF NOT EXISTS vector"
+```
+
+In `.env`:
+
+```bash
+DATABASE_URL=postgresql+psycopg:///upscaler_dev
+TEST_DATABASE_URL=postgresql+psycopg:///upscaler_test
+FFMPEG_PATH=/opt/homebrew/bin/ffmpeg
+```
+
+Then `pip install -e ".[dev,postgres]"`, `alembic upgrade head`, and start uvicorn as usual.
+The `///dbname` form connects over the local socket as your macOS user, so no password is
+needed.
+
+### Other Postgres (Neon, RDS, ...)
 
 Any Postgres 16+ with pgvector works (Homebrew, Neon, RDS, ...):
 
@@ -57,14 +78,16 @@ uvicorn app.main:create_app --factory --reload
 ## Tests
 
 ```bash
-pytest                                                            # SQLite
-TEST_DATABASE_URL=postgresql+psycopg:///upscaler_test pytest      # Postgres
+pytest                          # Postgres if TEST_DATABASE_URL is set (env or .env), else SQLite
+TEST_DATABASE_URL= pytest       # force SQLite
 ```
 
-The test database is built with the real migrations (`downgrade base` then `upgrade head`)
-at session start, and tables are emptied after each test. **Point `TEST_DATABASE_URL` only at
-a throw-away database: its contents are wiped.** Tests need no network or API keys. The
-ffmpeg tests generate a short clip and are skipped when ffmpeg is not installed.
+With a Postgres `TEST_DATABASE_URL`, each run creates that database from scratch (dropping
+any leftover copy), enables pgvector, builds the schema with the real migrations, and drops
+the database when the run ends. Your dev database is never touched. As a safeguard, the
+database name must end in `_test`, otherwise the run is refused. On SQLite a temporary file is
+used. Tables are emptied after each test. Tests need no network or API keys. The ffmpeg tests
+generate a short clip and are skipped when ffmpeg is not installed.
 
 Verified on 2026-10-28: 53 tests pass on SQLite and on Postgres 18.3 with pgvector 0.8.7
 (Homebrew).

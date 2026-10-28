@@ -1,34 +1,73 @@
-import os
+import re
 from collections.abc import Callable, Iterator, Sequence
 
 import pymupdf
 import pytest
-from alembic import command
 from fastapi.testclient import TestClient
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine, make_url
 
 from app.config import Settings
-from app.db import Base, alembic_config, make_engine, upgrade_database
+from app.db import PROJECT_ROOT, Base, make_engine, upgrade_database
 from app.main import create_app
 
 ADMIN_KEY = "test-admin-key"
+_SAFE_TEST_DB_NAME = re.compile(r"^[A-Za-z0-9_]+_test$")
+
+
+class _TestEnv(BaseSettings):
+    """TEST_DATABASE_URL from the environment or the project's .env file."""
+
+    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
+
+    test_database_url: str | None = None
+
+
+def _recreate_postgres_db(url: str, drop_only: bool = False) -> None:
+    db_url = make_url(url)
+    name = db_url.database or ""
+    if not _SAFE_TEST_DB_NAME.match(name):
+        raise pytest.UsageError(
+            f"TEST_DATABASE_URL database {name!r} must end in '_test'; it is dropped and recreated."
+        )
+    admin = create_engine(db_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as connection:
+        connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        if not drop_only:
+            connection.execute(text(f'CREATE DATABASE "{name}"'))
+    admin.dispose()
 
 
 @pytest.fixture(scope="session")
-def database_url(tmp_path_factory) -> str:
-    """SQLite by default; set TEST_DATABASE_URL to run the suite on Postgres.
+def database_url(tmp_path_factory) -> Iterator[str]:
+    """SQLite by default; set TEST_DATABASE_URL (env or .env) to use Postgres.
 
-    The test database is wiped and rebuilt from migrations at session start.
+    A Postgres test database is a throw-away: created fresh for the session
+    (with pgvector, like dev), built from migrations and dropped afterwards.
     """
-    return os.environ.get("TEST_DATABASE_URL") or f"sqlite:///{tmp_path_factory.mktemp('db') / 'test.db'}"
+    url = _TestEnv().test_database_url
+    if not url:
+        yield f"sqlite:///{tmp_path_factory.mktemp('db') / 'test.db'}"
+        return
+    if make_url(url).get_backend_name() != "postgresql":
+        yield url
+        return
+
+    _recreate_postgres_db(url)
+    try:
+        engine = make_engine(url)
+        with engine.begin() as connection:
+            connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        engine.dispose()
+        yield url
+    finally:
+        _recreate_postgres_db(url, drop_only=True)
 
 
 @pytest.fixture(scope="session")
 def migrated_engine(database_url) -> Iterator[Engine]:
     engine = make_engine(database_url)
-    with engine.begin() as connection:
-        command.downgrade(alembic_config(connection), "base")
     upgrade_database(engine)
     yield engine
     engine.dispose()
